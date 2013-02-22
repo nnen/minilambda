@@ -7,6 +7,27 @@ import ply.lex as lex
 import ply.yacc as yacc
 
 
+__doc__ = """minilambda - MiniLambda Interactive Interpreter
+
+MiniLambda is a simple lambda calculus-like language.
+
+Syntax:
+
+MiniLambda allows multiple character identifiers, so `ab` is not the
+application of `a` on `b`, it is a single variable `ab`. Whitespace needs to be
+put between adjancent identifiers, for example `a b`, or `^x y . x`.
+
+Instead of lambda symbol, MiniLambda uses caret, `^`. So a lambda function which
+takes an argument `x` and returns `x` to `x` is: `^x . x x`.
+
+Subexpressions can be parenthised: `a (b c)` - apply `a` to the result of
+application of `b` to `c`.
+
+Application is left-associative. This means applications are evaluated from
+left to right, for example `a b c d` is equvialent to `(((a b) c) d)`.
+"""
+
+
 class Lexer(object):
     tokens = (
         "KW_LET",
@@ -234,6 +255,12 @@ class Lambda(Expression):
         return Lambda(list(self.variables), self.expr.substitute(new_subs))
     
     def normalize(self):
+        if len(self.variables) > 1:
+            result = self.expr
+            for v in reversed(self.variables):
+                result = Lambda([v, ], result)
+            return result
+        
         expr = self.expr.normalize()
         if expr is None:
             return None
@@ -241,23 +268,31 @@ class Lambda(Expression):
 
 
 class InteractiveInterpreter(cmd.Cmd):
-    def __init__(self):
-        cmd.Cmd.__init__(self)
+    def __init__(self, **kwargs):
+        cmd.Cmd.__init__(self,
+                         stdin = kwargs.get("stdin", None),
+                         stdout = kwargs.get("stdout", None))
         self.prompt = ">>> "
         self.parser = Parser()
-        #self.last_expr = Expression()
         self.lets = []
+
+    def _println(self, s):
+        self.stdout.write(str(s))
+        self.stdout.write("\n")
+    
+    def help_syntax(self, *args):
+        self._println(__doc__)
     
     def do_exit(self, args):
         return True
     
     def do_quit(self, args):
         return True
-
+    
     def do_dump(self, args):
-        print "LETS:"
+        self._println("LETS:")
         for l in self.lets:
-            print "\t%s" % (l, )
+            self._println("\t%s" % (l, ))
     
     def default(self, line):
         e = self.parser.parse(line)
@@ -268,16 +303,16 @@ class InteractiveInterpreter(cmd.Cmd):
                 for l in reversed(self.lets):
                     e = l.chain(e)
                 try:
-                    print normalize(e)
+                    self._println(normalize(e))
                 except Exception:
-                    print "Normalization failed. Possible loop."
+                    self._println("Normalization failed. Possible loop.")
         return False
 
 
 def main():
     console = InteractiveInterpreter()
     console.cmdloop()
-    
+
 
 if __name__ == '__main__':
     main()
