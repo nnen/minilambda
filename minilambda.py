@@ -6,9 +6,6 @@ import re
 import sys
 from collections import namedtuple
 
-import ply.lex as lex
-import ply.yacc as yacc
-
 
 __doc__ = """minilambda - MiniLambda Interactive Interpreter
 
@@ -43,7 +40,7 @@ def _tokens(lexer, *tokens):
     return result
 
 
-class Lexer2(object):
+class Lexer(object):
     TOKENS = (
         ("KW_LET",    r"let",               None, ),
         #("KW_PRINT",  r"print",             None, ),
@@ -64,7 +61,7 @@ class Lexer2(object):
     UNKNOWN_TOKEN = "UNKNOWN"
     
     IGNORE = " \t"
-    DELIMITERS = " \t\n()^."
+    DELIMITERS = " \t\n()\\."
     
     def t_newline(self, t):
         self.line += t.value.count("\n")
@@ -172,9 +169,9 @@ class NoResult(object):
 NO_RESULT = NoResult()
 
 
-class Parser3(object):
+class MonadicParser(object):
     def prepend(self, other):
-        other = Parser3.make(other)
+        other = MonadicParser.make(other)
         return self.and_(other).map(lambda a, b: [a, ] + b)
     
     def loop(self):
@@ -186,14 +183,14 @@ class Parser3(object):
         return FnParser(lambda t: self(t).map(fn))
     
     def or_(self, other):
-        other = Parser3.make(other)
+        other = MonadicParser.make(other)
         return FnParser(lambda t: self(t) or other(t))
     
     def and_(self, other):
-        return AndParser(self, Parser3.make(other))
+        return AndParser(self, MonadicParser.make(other))
     
     def then_(self, other):
-        other = Parser3.make(other)
+        other = MonadicParser.make(other)
         return FnParser(lambda t: self(t).bind(other))
     
     def end(self):
@@ -216,14 +213,14 @@ class Parser3(object):
     
     @classmethod
     def make(self, v):
-        if isinstance(v, Parser3):
+        if isinstance(v, MonadicParser):
             return v
         if isinstance(v, basestring):
             return TokenParser(v)
         return self.identity(v)
 
 
-class FnParser(Parser3):
+class FnParser(MonadicParser):
     def __init__(self, fn):
         self.fn = fn
     
@@ -231,7 +228,7 @@ class FnParser(Parser3):
         return self.fn(tokens)
 
 
-class TokenParser(Parser3):
+class TokenParser(MonadicParser):
     def __init__(self, token_type):
         self.token_type = token_type
     
@@ -241,12 +238,12 @@ class TokenParser(Parser3):
         return NO_RESULT
 
 
-class UnaryParser(Parser3):
+class UnaryParser(MonadicParser):
     def __init__(self, inner_parser):
         self.inner_parser = inner_parser
 
 
-class BinaryParser(Parser3):
+class BinaryParser(MonadicParser):
     def __init__(self, a, b):
         self.a = a
         self.b = b
@@ -271,7 +268,7 @@ class FutureParser(UnaryParser):
         return self.inner_parser.parse(tokens)
 
 
-p = Parser3.make
+p = MonadicParser.make
 
 TERM_PARSER = FutureParser()
 SIMPLE_TERM_PARSER = FutureParser()
@@ -297,215 +294,12 @@ PROGRAM_PARSER += LET_PARSER.and_(p("COMMA").then_(PROGRAM_PARSER)).map(lambda a
     TERM_PARSER.and_(p("COMMA").then_(PROGRAM_PARSER)).map(lambda a, b: Sequence([a, b]))).or_(TERM_PARSER)
 
 
-class Parser2(object):
-    def __init__(self):
-        pass
-    
-    def parse_program(self, s):
-        self._begin(s)
-        return self._parse_program()
-    
-    def parse_term(self, s):
-        self._begin(s)
-        return self._parse_program()
-    
-    def _begin(self, s):
-        self.lexer = Lexer2()
-        self.lexer.input(s)
-        self.token = self.lexer.token()
-    
-    def _next(self):
-        if not self.token:
-            return None
-        
-        self.token = self.lexer.token()
-        return self.token
-    
-    def _next(self, token_type):
-        self._next()
-        if self.token.type <> token_type:
-            raise Exception(self.token)
-        return self.token
-    
-    def _expect(self, token_type):
-        if token_type is None:
-            if self.token is None:
-                return None
-            raise Exception(self.token)
-        if self.token and (self.token.type == token_type):
-            return
-        raise Exception(self.token)
-    
-    def _nextIf(self, token_type):
-        t = self.token
-        if self.token.type <> token_type:
-            return None
-        self._next()
-        return t
-    
-    def _parse_program(self):
-        program = []
-        while True:
-            term = self._parse_term()
-            if not term:
-                self._expect(None)
-                return program
-            program.append(term)
-            if not self._nextIf("COMMA"):
-                self._expect(None)
-                return program
-    
-    def _parse_term(self):
-        term = self._parse_simple_term()
-        if not term: return None
-        while True:
-            t = self._parse_simple_term()
-            if not t: return term
-            term = Application(term, t)
-    
-    def _parse_simple_term(self):
-        term = self._parse_var()
-        if not term: term = self._parse_lambda()
-        if not term: term = self._parse_par()
-        return term
-    
-    def _parse_var(self):
-        ident = self._nextIf("IDENT")
-        if not ident: return None
-        return VarRef(ident.value)
-    
-    def _parse_lambda(self):
-        if not self._nextIf("LAMBDA"): return None
-        
-        self._expect("IDENT")
-        variables = [self.token.value, ]
-        self._next()
-        
-        while True:
-            ident = self._nextIf("IDENT")
-            if not ident: break
-            variables.append(ident.value)
-        
-        self._expect("DOT")
-        
-        # if not self._expect("LAMBDA"): return None
-        # variables = []
-        # while self._expect("IDENT"):
-        #     variables.append(self.token.value)
-        # if self.value.type <> "DOT": return None
-        # body = self._parse_term()
-        # return Lambda(variables, body)
-    
-    def _parse_par(self):
-        if not self._expect("LEFT_PAR"): return None
-        result = self._parse_term()
-        if not self._expect("RIGHT_PAR"): return None
-        return result
-    
-    def _parse_let(self):
-        if not self._expect("KW_LET"): return None
-        if not self._expect("IDENT"): return None
-        var = self.token.value
-        if not self._expect("EQUALS"): return None
-        val = self._parse_term()
-        return LetExp(var, val)
-
-
-class Lexer(object):
-    tokens = (
-        "KW_LET",
-        
-        "EQUALS",
-        
-        "LAMBDA",
-        "IDENT",
-        "DOT",
-        "LEFT_PAR",
-        "RIGHT_PAR",
-    )
-    
-    keywords = {
-        "let": "KW_LET",
-    }
-
-    t_EQUALS = r'\='
-    
-    t_LAMBDA = r'\^'
-    #t_IDENT = r'[a-zA-Z_+*/-]+'
-    t_DOT = r'\.'
-    t_LEFT_PAR = r'\('
-    t_RIGHT_PAR = r'\)'
-    
-    t_ignore = " \t"
-    
-    def t_IDENT(self, t):
-        r'[0-9a-zA-Z_+*/-]+'
-        t.type = self.keywords.get(t.value, "IDENT")
-        return t
-    
-    def t_newline(self, t):
-        r'\n+'
-        t.lexer.lineno += t.value.count("\n")
-    
-    def t_error(self, t):
-        print "Illegal character '%s'" % t.value[0]
-        t.lexer.skip(1)
-    
-    def __init__(self):
-        self.lexer = lex.lex(module = self)
-    
-    def scan(self, source):
-        self.lexer.input(source)
-        t = self.lexer.token()
-        while t:
-            yield t
-            t = self.lexer.token()
-
-
 class Parser(object):
-    tokens = Lexer.tokens
-    
-    def p_expression(self, t):
-        r"""expression : atom"""
-        t[0] = t[1]
-    
-    def p_expression_app(self, t):
-        r"""expression : expression atom"""
-        t[0] = Application(t[1], (t[2], ))
-    
-    def p_atom_var_ref(self, t):
-        r"""atom : IDENT"""
-        t[0] = VarRef(t[1])
-    
-    def p_atom_lambda(self, t):
-        r"""atom : LAMBDA var-list DOT expression"""
-        t[0] = Lambda(t[2], t[4])
-    
-    def p_atom_par(self, t):
-        r"""atom : LEFT_PAR expression RIGHT_PAR"""
-        t[0] = t[2]
-    
-    def p_atom_par_let(self, t):
-        r"""atom : let"""
-        t[0] = t[1]
-    
-    def p_var_list(self, t):
-        r"""var-list : IDENT""" 
-        t[0] = [t[1], ]
-    
-    def p_var_list_rest(self, t):
-        r"""var-list : var-list IDENT""" 
-        t[0] = t[1] + [t[2], ]
-    
-    def p_let(self, t):
-        r"""let : KW_LET IDENT EQUALS expression"""
-        t[0] = LetExp(t[2], t[4])
-    
-    def __init__(self):
-        self.yacc = yacc.yacc(module = self)
-    
-    def parse(self, source):
-        return self.yacc.parse(source, lexer = Lexer().lexer)
+    def parse_term(self, s):
+        return TERM_PARSER(list(Lexer(s)))
+
+    def parse_program(self, s):
+        return PROGRAM_PARSER(list(Lexer(s)))
 
 
 def normalize(expr):
@@ -734,7 +528,7 @@ class InteractiveInterpreter(cmd.Cmd):
             self._println("\t%s" % (l, ))
     
     def default(self, line):
-        e = self.parser.parse(list(Lexer2(line))).value
+        e = self.parser.parse(list(Lexer(line))).value
         if e:
             if isinstance(e, LetExp):
                 self.lets.append(e)
@@ -754,26 +548,5 @@ def main():
 
 
 if __name__ == '__main__':
-    #main()
-    
-    e = PROGRAM_PARSER(list(Lexer2(sys.stdin.read()))).value
-    print e
-    print normalize(e)
-    
-    # l = Lexer2("(^x.x x) a b")
-    # t = list(l)
-    # 
-    # #print TERM_PARSER(t)
-    # 
-    # print TERM_PARSER(t).value
-    
-    # print "=" * 80
-    # l = Lexer2("a b c d e f g")
-    # t = list(l)
-    # print "=" * 80
-    # #print p("IDENT").loop()(t)
-    # print VAR_LIST_PARSER(t)
-    # print "=" * 80
-    # #print p("IDENT").and_(p("IDENT").loop()).map(lambda a, b: [a, ] + b)(t)
-    # print "=" * 80
+    main()
 
