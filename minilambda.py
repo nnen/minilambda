@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import cmd
+import re
+import sys
+from collections import namedtuple
 
 import ply.lex as lex
 import ply.yacc as yacc
@@ -28,10 +31,390 @@ left to right, for example `a b c d` is equvialent to `(((a b) c) d)`.
 """
 
 
+Token = namedtuple("Token", "type value line column pos")
+
+
+def _tokens(lexer, *tokens):
+    result = []
+    for name, exp, func in tokens:
+        meth_name = "t_%s" % (name, )
+        func = getattr(lexer, meth_name, None)
+        result.append((name, re.compile(exp), func ))
+    return result
+
+
+class Lexer2(object):
+    TOKENS = (
+        ("KW_LET",    r"let",               None, ),
+        #("KW_PRINT",  r"print",             None, ),
+        
+        ("EQUALS",    r'\=',                None, ), 
+        
+        ("LAMBDA",    r'\\',                None, ),
+        ("IDENT",     r'[0-9a-zA-Z_+*/-]+', None, ),
+        ("DOT",       r'\.',                None, ),
+        ("LEFT_PAR",  r'\(',                None, ),
+        ("RIGHT_PAR", r'\)',                None, ),
+        
+        ("COMMA",     r'\,',                None, ),
+        
+        ("newline",   r'\n+',               None, ),
+    )
+    
+    UNKNOWN_TOKEN = "UNKNOWN"
+    
+    IGNORE = " \t"
+    DELIMITERS = " \t\n()^."
+    
+    def t_newline(self, t):
+        self.line += t.value.count("\n")
+        self.column = 1
+        return None
+    
+    def __init__(self, s = None):
+        self.tokens = _tokens(self, *self.TOKENS)
+        if s:
+            self.input(s)
+    
+    def __iter__(self):
+        return self
+    
+    def input(self, s):
+        self.data = s
+        self.pos = 0
+        self.line = 1
+        self.column = 1
+    
+    def token(self):
+        data = self.data
+        pos = self.pos
+        
+        while pos < len(data):
+            if data[pos] in self.IGNORE:
+                pos += 1
+                continue
+            
+            for name, exp, func in self.tokens:
+                m = exp.match(data, pos)
+                if not m: continue
+                
+                tok = Token(name, m.group(), self.line, self.column, pos)
+                self.column += len(tok.value)
+                
+                if func:
+                    tok = func(tok)
+                
+                pos = m.end()
+                self.pos = pos
+                
+                if not tok:
+                    break
+                return tok
+            else:
+                end_pos = pos
+                while (end_pos < len(data)) and (data[end_pos] not in self.DELIMITERS):
+                    end_pos += 1
+                
+                if end_pos >= len(data):
+                    return None
+                
+                err_tok = Token(self.UNKNOWN_TOKEN,
+                                data[pos:end_pos],
+                                self.line,
+                                self.column,
+                                pos)
+                
+                pos = end_pos
+                self.pos = pos
+                self.column += end_pos - pos
+                return err_tok
+        
+        return None
+    
+    def next(self):
+        t = self.token()
+        if not t:
+            raise StopIteration()
+        return t
+    
+    @classmethod
+    def runmain(cls):
+        lexer = cls(sys.stdin.read())
+        for t in lexer:
+            print t
+
+
+class Result(namedtuple("Result", "value rest")):
+    def __nonzero__(self):
+        return True
+    
+    def bind(self, parser):
+        return parser(self.rest)
+    
+    def map(self, fn):
+        if isinstance(self.value, tuple) and not isinstance(self.value, Token):
+            return Result(fn(*self.value), self.rest)
+        return Result(fn(self.value), self.rest)
+
+
+class NoResult(object):
+    value = None
+    
+    def __nonzero__(self):
+        return False
+    
+    def bind(self, parser):
+        return self
+    
+    def map(self, fn):
+        return self
+
+NO_RESULT = NoResult()
+
+
+class Parser3(object):
+    def prepend(self, other):
+        other = Parser3.make(other)
+        return self.and_(other).map(lambda a, b: [a, ] + b)
+    
+    def loop(self):
+        p = FutureParser()
+        p += self.prepend(p).or_([])
+        return p
+    
+    def map(self, fn):
+        return FnParser(lambda t: self(t).map(fn))
+    
+    def or_(self, other):
+        other = Parser3.make(other)
+        return FnParser(lambda t: self(t) or other(t))
+    
+    def and_(self, other):
+        return AndParser(self, Parser3.make(other))
+    
+    def then_(self, other):
+        other = Parser3.make(other)
+        return FnParser(lambda t: self(t).bind(other))
+    
+    def end(self):
+        def fn(tokens):
+            result = self(tokens)
+            if len(result.rest) > 0:
+                return NO_RESULT
+            return result
+        return FnParser(fn)
+    
+    def parse(self, tokens):
+        return (None, tokens)
+
+    def __call__(self, tokens):
+        return self.parse(tokens)
+
+    @classmethod
+    def identity(self, value):
+        return FnParser(lambda t: Result(value, t))
+    
+    @classmethod
+    def make(self, v):
+        if isinstance(v, Parser3):
+            return v
+        if isinstance(v, basestring):
+            return TokenParser(v)
+        return self.identity(v)
+
+
+class FnParser(Parser3):
+    def __init__(self, fn):
+        self.fn = fn
+    
+    def parse(self, tokens):
+        return self.fn(tokens)
+
+
+class TokenParser(Parser3):
+    def __init__(self, token_type):
+        self.token_type = token_type
+    
+    def parse(self, tokens):
+        if (len(tokens) > 0) and (tokens[0].type == self.token_type):
+            return Result(tokens[0], tokens[1:])
+        return NO_RESULT
+
+
+class UnaryParser(Parser3):
+    def __init__(self, inner_parser):
+        self.inner_parser = inner_parser
+
+
+class BinaryParser(Parser3):
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+
+class AndParser(BinaryParser):
+    def parse(self, tokens):
+        result = self.a.parse(tokens)
+        result2 = result.bind(self.b)
+        return result2.bind(lambda t: Result((result.value, result2.value), result2.rest))
+
+
+class FutureParser(UnaryParser):
+    def __init__(self, inner_parser = None):
+        UnaryParser.__init__(self, inner_parser)
+    
+    def __iadd__(self, other):
+        self.inner_parser = other
+        return self
+    
+    def parse(self, tokens):
+        return self.inner_parser.parse(tokens)
+
+
+p = Parser3.make
+
+TERM_PARSER = FutureParser()
+SIMPLE_TERM_PARSER = FutureParser()
+
+VAR_PARSER = p("IDENT").map(lambda t: VarRef(t.value))
+
+VAR_LIST_PARSER = p("IDENT").map(lambda t: t.value).prepend(p("IDENT").map(lambda t: t.value).loop())
+LAMBDA_PARSER = p("LAMBDA").then_(VAR_LIST_PARSER).and_(p("DOT").then_(TERM_PARSER)).map(lambda a, b: Lambda(a, b))
+
+PAR_PARSER = p("LEFT_PAR").then_(TERM_PARSER).and_("RIGHT_PAR").map(lambda a, b: a)
+
+LET_PARSER = p("KW_LET").then_("IDENT").and_("EQUALS").map(lambda a, b: a).and_(TERM_PARSER).map(lambda a, b: LetExp(a.value, b))
+
+PRINT_PARSER = p("KW_PRINT").map(lambda t: PrintBuiltin())
+
+#SIMPLE_TERM_PARSER += VAR_PARSER.or_(LAMBDA_PARSER).or_(PAR_PARSER).or_(LET_PARSER).or_(PRINT_PARSER)
+SIMPLE_TERM_PARSER += VAR_PARSER.or_(LAMBDA_PARSER).or_(PAR_PARSER).or_(LET_PARSER)
+
+TERM_PARSER += SIMPLE_TERM_PARSER.prepend(SIMPLE_TERM_PARSER.loop()).map(lambda t: Application.from_list(t))
+
+PROGRAM_PARSER = FutureParser()
+PROGRAM_PARSER += LET_PARSER.and_(p("COMMA").then_(PROGRAM_PARSER)).map(lambda a, b: a.with_expr(b)).or_(
+    TERM_PARSER.and_(p("COMMA").then_(PROGRAM_PARSER)).map(lambda a, b: Sequence([a, b]))).or_(TERM_PARSER)
+
+
+class Parser2(object):
+    def __init__(self):
+        pass
+    
+    def parse_program(self, s):
+        self._begin(s)
+        return self._parse_program()
+    
+    def parse_term(self, s):
+        self._begin(s)
+        return self._parse_program()
+    
+    def _begin(self, s):
+        self.lexer = Lexer2()
+        self.lexer.input(s)
+        self.token = self.lexer.token()
+    
+    def _next(self):
+        if not self.token:
+            return None
+        
+        self.token = self.lexer.token()
+        return self.token
+    
+    def _next(self, token_type):
+        self._next()
+        if self.token.type <> token_type:
+            raise Exception(self.token)
+        return self.token
+    
+    def _expect(self, token_type):
+        if token_type is None:
+            if self.token is None:
+                return None
+            raise Exception(self.token)
+        if self.token and (self.token.type == token_type):
+            return
+        raise Exception(self.token)
+    
+    def _nextIf(self, token_type):
+        t = self.token
+        if self.token.type <> token_type:
+            return None
+        self._next()
+        return t
+    
+    def _parse_program(self):
+        program = []
+        while True:
+            term = self._parse_term()
+            if not term:
+                self._expect(None)
+                return program
+            program.append(term)
+            if not self._nextIf("COMMA"):
+                self._expect(None)
+                return program
+    
+    def _parse_term(self):
+        term = self._parse_simple_term()
+        if not term: return None
+        while True:
+            t = self._parse_simple_term()
+            if not t: return term
+            term = Application(term, t)
+    
+    def _parse_simple_term(self):
+        term = self._parse_var()
+        if not term: term = self._parse_lambda()
+        if not term: term = self._parse_par()
+        return term
+    
+    def _parse_var(self):
+        ident = self._nextIf("IDENT")
+        if not ident: return None
+        return VarRef(ident.value)
+    
+    def _parse_lambda(self):
+        if not self._nextIf("LAMBDA"): return None
+        
+        self._expect("IDENT")
+        variables = [self.token.value, ]
+        self._next()
+        
+        while True:
+            ident = self._nextIf("IDENT")
+            if not ident: break
+            variables.append(ident.value)
+        
+        self._expect("DOT")
+        
+        # if not self._expect("LAMBDA"): return None
+        # variables = []
+        # while self._expect("IDENT"):
+        #     variables.append(self.token.value)
+        # if self.value.type <> "DOT": return None
+        # body = self._parse_term()
+        # return Lambda(variables, body)
+    
+    def _parse_par(self):
+        if not self._expect("LEFT_PAR"): return None
+        result = self._parse_term()
+        if not self._expect("RIGHT_PAR"): return None
+        return result
+    
+    def _parse_let(self):
+        if not self._expect("KW_LET"): return None
+        if not self._expect("IDENT"): return None
+        var = self.token.value
+        if not self._expect("EQUALS"): return None
+        val = self._parse_term()
+        return LetExp(var, val)
+
+
 class Lexer(object):
     tokens = (
         "KW_LET",
-
+        
         "EQUALS",
         
         "LAMBDA",
@@ -56,7 +439,7 @@ class Lexer(object):
     t_ignore = " \t"
     
     def t_IDENT(self, t):
-        r'[a-zA-Z_+*/-]+'
+        r'[0-9a-zA-Z_+*/-]+'
         t.type = self.keywords.get(t.value, "IDENT")
         return t
     
@@ -145,6 +528,9 @@ class Expression(object):
     def __str__(self):
         return "???"
     
+    def substitute(self, subs):
+        return self
+    
     def apply(self, args):
         #return Application(self, args)
         return None
@@ -160,18 +546,29 @@ class Expression(object):
 
 
 class LetExp(Expression):
-    def __init__(self, var, value):
+    def __init__(self, var, value, expr = None):
         self.var = var
         self.value = value
+        self.expr = expr
     
     def __repr__(self):
+        if self.expr:
+            return "%s(%r, %r, %r)" % (type(self).__name__, self.var, self.value, self.expr)
         return "%s(%r, %r)" % (type(self).__name__, self.var, self.value)
     
     def __str__(self):
+        if self.expr:
+            return "let %s = %s, %s" % (self.var, self.value, self.expr, )
         return "let %s = %s" % (self.var, self.value, )
+    
+    def with_expr(self, expr):
+        return LetExp(self.var, self.value, expr)
     
     def chain(self, other):
         return Application(Lambda([self.var, ], other), [self.value, ])
+    
+    def normalize(self):
+        return Application(Lambda([self.var, ], self.expr), [self.value, ])
 
 
 class VarRef(Expression):
@@ -204,7 +601,7 @@ class Application(Expression):
     
     def __repr__(self):
         return "%s(%r, %r)" % (type(self).__name__, self.fn, self.args, )
-
+    
     def __str__(self):
         return "(%s %s)" % (self.fn, ", ".join((str(a) for a in self.args)), )
     
@@ -228,6 +625,13 @@ class Application(Expression):
             return Application(fn or self.fn, map(lambda a, b: a or b, args, self.args))
         
         return self.fn.apply(self.args)
+    
+    @classmethod
+    def from_list(self, terms):
+        if len(terms) == 1:
+            return terms[0]
+        #return Application(terms[0], terms[1:])
+        return Application(Application.from_list(terms[:-1]), terms[-1:])
 
 
 class Lambda(Expression):
@@ -239,7 +643,7 @@ class Lambda(Expression):
         return "%s(%r, %r)" % (type(self).__name__, self.variables, self.expr, )
     
     def __str__(self):
-        return "(^%s . %s)" % (" ".join(self.variables), self.expr, )
+        return "(\\%s . %s)" % (" ".join(self.variables), self.expr, )
     
     def apply(self, args):
         subs = {k: v for (k, v) in zip(self.variables, args)}
@@ -267,15 +671,50 @@ class Lambda(Expression):
         return Lambda(list(self.variables), expr)
 
 
+class Sequence(Expression):
+    def __init__(self, terms):
+        self.terms = terms
+    
+    def __repr__(self):
+        return "%s(%r)" % (type(self).__name__, self.terms, )
+    
+    def __str__(self):
+        return ", ".join([str(t) for t in self.terms])
+    
+    def substitute(self, subs):
+        return Sequence([t.substitute(subs) for t in self.terms])
+    
+    def normalize(self):
+        if len(self.terms) == 1:
+            return self.terms[0]
+        
+        t = self.terms[0].normalize()
+        if t:
+            return Sequence([t, ] + self.terms[1:])
+        return Sequence(self.terms[1:])
+
+
+#class PrintBuiltin(Expression):
+#    def __str__(self):
+#        return "print"
+#    
+#    def apply(self, args):
+#        t = args[0].normalize()
+#        if not t:
+#            print args[0]
+#        return Application.from_list(list(args))
+
+
 class InteractiveInterpreter(cmd.Cmd):
     def __init__(self, **kwargs):
         cmd.Cmd.__init__(self,
                          stdin = kwargs.get("stdin", None),
                          stdout = kwargs.get("stdout", None))
         self.prompt = ">>> "
-        self.parser = Parser()
+        #self.parser = Parser()
+        self.parser = TERM_PARSER
         self.lets = []
-
+    
     def _println(self, s):
         self.stdout.write(str(s))
         self.stdout.write("\n")
@@ -295,7 +734,7 @@ class InteractiveInterpreter(cmd.Cmd):
             self._println("\t%s" % (l, ))
     
     def default(self, line):
-        e = self.parser.parse(line)
+        e = self.parser.parse(list(Lexer2(line))).value
         if e:
             if isinstance(e, LetExp):
                 self.lets.append(e)
@@ -315,5 +754,26 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    #main()
+    
+    e = PROGRAM_PARSER(list(Lexer2(sys.stdin.read()))).value
+    print e
+    print normalize(e)
+    
+    # l = Lexer2("(^x.x x) a b")
+    # t = list(l)
+    # 
+    # #print TERM_PARSER(t)
+    # 
+    # print TERM_PARSER(t).value
+    
+    # print "=" * 80
+    # l = Lexer2("a b c d e f g")
+    # t = list(l)
+    # print "=" * 80
+    # #print p("IDENT").loop()(t)
+    # print VAR_LIST_PARSER(t)
+    # print "=" * 80
+    # #print p("IDENT").and_(p("IDENT").loop()).map(lambda a, b: [a, ] + b)(t)
+    # print "=" * 80
 
