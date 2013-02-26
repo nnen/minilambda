@@ -1,3 +1,4 @@
+#!/usr/bin/python
 #!/Library/Frameworks/Python.framework/Versions/2.7/bin/python
 # -*- coding: utf-8 -*-
 
@@ -15,10 +16,10 @@ Syntax:
 
 MiniLambda allows multiple character identifiers, so `ab` is not the
 application of `a` on `b`, it is a single variable `ab`. Whitespace needs to be
-put between adjancent identifiers, for example `a b`, or `^x y . x`.
+put between adjancent identifiers, for example `a b`, or `\\x y . x`.
 
-Instead of lambda symbol, MiniLambda uses caret, `^`. So a lambda function which
-takes an argument `x` and returns `x` to `x` is: `^x . x x`.
+Instead of lambda symbol, MiniLambda uses caret, `\\`. So a lambda function which
+takes an argument `x` and returns `x` to `x` is: `\\x . x x`.
 
 Subexpressions can be parenthised: `a (b c)` - apply `a` to the result of
 application of `b` to `c`.
@@ -440,7 +441,10 @@ class Lambda(Expression):
         return "(\\%s . %s)" % (" ".join(self.variables), self.expr, )
     
     def apply(self, args):
-        subs = {k: v for (k, v) in zip(self.variables, args)}
+        subs = {}
+        for k, v in zip(self.variables, args):
+            subs[k] = v
+        #subs = {k: v for (k, v) in zip(self.variables, args)}
         if len(args) < len(self.variables):
             return Lambda(self.variables[len(args):], self.expr.substitute(subs))
         else:
