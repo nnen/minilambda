@@ -3,6 +3,16 @@ MiniLambda Interactive Interpreter
 
 MiniLambda is a simple lambda calculus-like language.
 
+Usage
+-----
+
+Entire interpreter is a single python script, `minilambda.py`. It has been
+tested with Python 2.6 and 2.7, but may run with other versions. Most unix-like
+operating systems come with Python installed, so all you need to do is to
+execute it from terminal:
+
+    $ ./minilambda.py
+
 Syntax
 ------
 
@@ -10,7 +20,7 @@ MiniLambda allows multiple character identifiers, so `ab` is not the
 application of `a` on `b`, it is a single variable `ab`. Whitespace needs to be
 put between adjancent identifiers, for example `a b`, or `\x y . x`.
 
-Instead of lambda symbol, MiniLambda uses caret, `\`. So a lambda function which
+Instead of lambda symbol, MiniLambda uses backslash, `\`. So a lambda function which
 takes an argument `x` and returns `x` to `x` is: `\x . x x`.
 
 Subexpressions can be parenthised: `a (b c)` - apply `a` to the result of
