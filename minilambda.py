@@ -542,10 +542,10 @@ class LetExp(Expression):
         return LetExp(self.var, self.value, expr)
     
     def chain(self, other):
-        return Application(Lambda([self.var, ], other), [self.value, ])
+        return Application(Lambda([self.var, ], other), self.value)
     
     def normalize(self):
-        return Application(Lambda([self.var, ], self.expr), [self.value, ])
+        return Application(Lambda([self.var, ], self.expr), self.value)
 
 
 class VarRef(Expression):
@@ -576,38 +576,37 @@ class Application(Expression):
             return True
         return False
     
-    def __init__(self, fn, args):
+    def __init__(self, fn, arg):
         Expression.__init__(self)
+        assert isinstance(fn, Expression)
+        assert isinstance(arg, Expression)
         self.fn = fn
-        self.args = args
+        self.arg = arg
     
     def __repr__(self):
-        return "%s(%r, %r)" % (type(self).__name__, self.fn, self.args, )
+        return "%s(%r, %r)" % (type(self).__name__, self.fn, self.arg, )
     
     def __str__(self):
-        return "(%s %s)" % (self.fn, ", ".join((str(a) for a in self.args)), )
+        return "(%s %s)" % (self.fn, self.arg, )
     
     def to_substrings(self):
         result = Substrings("(")
         result += self.fn.to_substrings()
-        
-        for a in self.args:
-            result += " "
-            result += a.to_substrings()
-        
+        result += " "
+        result += self.arg.to_substrings()
         result += ")"
         return result.whole(self)
     
     def get_free_vars(self, name):
         result = self.fn.get_free_vars(name)
-        for a in self.args:
-            result += a.get_free_vars(name)
+        result += self.arg.get_free_vars(name)
         return result
     
     def substitute(self, subs):
         return Application(
             self.fn.substitute(subs),
-            map(lambda v: v.substitute(subs), self.args),
+            self.arg.substitute(subs),
+            #map(lambda v: v.substitute(subs), self.args),
         )
     
     def eval(self):
@@ -616,38 +615,39 @@ class Application(Expression):
         return fn.apply(args)
     
     def normalize(self):
+        if isinstance(self.fn, Lambda):
+            return self.fn.apply([self.arg, ])
+        
         fn = self.fn.normalize()
-        args = map(lambda a: a.normalize(), self.args)
-        args_normalized = reduce(lambda a, b: (a or b) is not None, args, None)
+        if fn:
+            return Application(fn, self.arg)
+
+        arg = self.arg.normalize()
+        if arg:
+            return Application(self.fn, arg)
         
-        if (fn is not None) or args_normalized:
-            return Application(fn or self.fn, map(lambda a, b: a or b, args, self.args))
-        
-        return self.fn.apply(self.args)
+        return None
     
     def normalize_verbose(self, context):
-        if len(self.args) > 1:
-            return context.advance(
-                Application.from_list([self.fn, ] + self.args),
-                "rewriting application to normal form",
-                orig = self)
+        #if len(self.args) > 1:
+        #    return context.advance(
+        #        Application.from_list([self.fn, ] + self.args),
+        #        "rewriting application to normal form",
+        #        orig = self)
         
         if isinstance(self.fn, Lambda):
             return context.advance(
-                self.fn.apply(self.args),
+                self.fn.apply([self.arg, ]),
                 "beta-reduction",
-                highlight = [self.fn, ] + self.args,
-                fn = self.fn, args = self.args)
+                highlight = [self.fn, self.arg, ])
         
         c = self.fn.normalize_verbose(context)
         if c:
-            return c.advance(Application(c.value, self.args))
+            return c.advance(Application(c.value, self.arg))
         
-        for i, a in enumerate(self.args):
-            c = a.normalize_verbose(context)
-            if not c: continue
-            return c.advance(
-                Application(self.fn, self.args[:i] + [c.value, ] + self.args[i + 1:]))
+        c = self.arg.normalize_verbose(context)
+        if c:
+            return c.advance(Application(self.fn, c.value))
         
         return None
     
@@ -656,7 +656,7 @@ class Application(Expression):
         if len(terms) == 1:
             return terms[0]
         #return Application(terms[0], terms[1:])
-        return Application(Application.from_list(terms[:-1]), terms[-1:])
+        return Application(Application.from_list(terms[:-1]), terms[-1])
 
 
 class Lambda(Expression):
