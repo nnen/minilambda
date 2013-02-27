@@ -5,6 +5,7 @@
 import cmd
 import re
 import sys
+import traceback
 from collections import namedtuple
 from optparse import OptionParser
 
@@ -45,6 +46,10 @@ value of a variable. For instance: `let T = \\t f . t`. In each subsequent
 expression, all free occurences of variable T will be substituted by `\\t f .
 t`. Interpreter command `dump` will print all of your defined variables.
 """
+
+###############################################################################
+# PARSER
+###############################################################################
 
 
 Token = namedtuple("Token", "type value line column pos")
@@ -188,6 +193,37 @@ class NoResult(object):
 NO_RESULT = NoResult()
 
 
+class ParserError(NoResult):
+    def __init__(self, token, expected = None):
+        self.token = token
+        self.expected = expected
+        self.alternative = None
+    
+    def __str__(self):
+        result = ""
+        if not self.token:
+            result = "Unknown syntax error."
+        elif not self.expected:
+            result = "Syntax error at line %d, column %d: unexpected token \"%s\"." % (
+                self.token.line, self.token.column, self.token.value, )
+        else:
+            result = "Syntax error at line %d, column %d: expected " \
+                    "token \"%s\", found \"%s\"" % (
+                        self.token.line,
+                        self.token.column,
+                        self.expected,
+                        self.token.value, )
+        #if self.alternative is not None:
+        result += "\n%s" % (self.alternative, )
+        return result
+    
+    def __or__(self, other):
+        if other:
+            return other
+        self.alternative = other
+        return self
+    
+
 class MonadicParser(object):
     def prepend(self, other):
         other = MonadicParser.make(other)
@@ -205,8 +241,14 @@ class MonadicParser(object):
         other = MonadicParser.make(other)
         return FnParser(lambda t: self(t) or other(t))
     
+    #__or__ = or_
+    def __or__(self, other):
+        return self.or_(other)
+    
     def and_(self, other):
         return AndParser(self, MonadicParser.make(other))
+    
+    __and__ = and_
     
     def then_(self, other):
         other = MonadicParser.make(other)
@@ -221,11 +263,11 @@ class MonadicParser(object):
         return FnParser(fn)
     
     def parse(self, tokens):
-        return (None, tokens)
-
+        return NO_RESULT
+    
     def __call__(self, tokens):
         return self.parse(tokens)
-
+    
     @classmethod
     def identity(self, value):
         return FnParser(lambda t: Result(value, t))
@@ -252,9 +294,13 @@ class TokenParser(MonadicParser):
         self.token_type = token_type
     
     def parse(self, tokens):
-        if (len(tokens) > 0) and (tokens[0].type == self.token_type):
-            return Result(tokens[0], tokens[1:])
-        return NO_RESULT
+        if len(tokens) < 1:
+            return ParserError(None, self.token_type)
+        
+        if tokens[0].type <> self.token_type:
+            return ParserError(tokens[0], self.token_type)
+        
+        return Result(tokens[0], tokens[1:])
 
 
 class UnaryParser(MonadicParser):
@@ -303,7 +349,6 @@ LET_PARSER = p("KW_LET").then_("IDENT").and_("EQUALS").map(lambda a, b: a).and_(
 
 PRINT_PARSER = p("KW_PRINT").map(lambda t: PrintBuiltin())
 
-#SIMPLE_TERM_PARSER += VAR_PARSER.or_(LAMBDA_PARSER).or_(PAR_PARSER).or_(LET_PARSER).or_(PRINT_PARSER)
 SIMPLE_TERM_PARSER += VAR_PARSER.or_(LAMBDA_PARSER).or_(PAR_PARSER).or_(LET_PARSER)
 
 TERM_PARSER += SIMPLE_TERM_PARSER.prepend(SIMPLE_TERM_PARSER.loop()).map(lambda t: Application.from_list(t))
@@ -321,7 +366,25 @@ class Parser(object):
         return PROGRAM_PARSER(list(Lexer(s)))
 
 
-def normalize(expr):
+###############################################################################
+# RUNTIME
+###############################################################################
+
+
+class LambdaException(Exception):
+    pass
+
+
+def normalize(expr, verbose = False):
+    if verbose:
+        c = EvalContext(expr)
+        for i in range(1000):
+            next_c = c.value.normalize_verbose(c)
+            if not next_c:
+                return c
+            c = next_c
+        raise Exception("Too many normalization iterations. Possible loop.") 
+    
     for i in range(1000):
         next_expr = expr.normalize()
         if next_expr is None:
@@ -330,16 +393,110 @@ def normalize(expr):
     raise Exception("Too many normalization iterations. Possible loop.") 
 
 
+class EvalContext(object):
+    def __init__(self, value, steps = []):
+        self.value = value
+        self.steps = steps
+    
+    def _step(self, orig, desc, **kwargs):
+        return Step(orig, desc, **kwargs)
+    
+    def advance(self, value, step = None, **kwargs):
+        if step:
+            return EvalContext(value, self.steps +
+                               [self._step(self.value, step, **kwargs), ])
+        return EvalContext(value, self.steps)
+
+
+class Step(object):
+    def __init__(self, orig, desc, highlight = [], **kwargs):
+        self.orig = orig
+        self.desc = desc
+        self.highlight = highlight
+        self.data = kwargs
+    
+    def __str__(self):
+        substrings = self.orig.to_substrings()
+        highlights = substrings.get(self.highlight)
+        
+        result = "%s -- " % (self.desc, )
+        offset = len(result)
+        
+        result += substrings.value
+        
+        if len(highlights) > 0:
+            result += "\n" + (" " * offset)
+            offset = 0
+            for h in highlights:
+                result += " " * (h[0] - offset)
+                result += "-" * h[1]
+                offset += ((h[0] - offset) + h[1])
+        
+        return result
+
+
+class Substrings(object):
+    def __init__(self, value, substrings = {}):
+        if isinstance(value, basestring):
+            self.value = value
+            self.substrings = dict(substrings)
+        else:
+            self.value = str(value)
+            self.substrings = dict(substrings)
+            self.substrings[value] = (0, len(self.value))
+    
+    def __repr__(self):
+        return "Substrings(%r, %r)" % (self.value, self.substrings, )
+    
+    def __getitem__(self, key):
+        return self.substrings[key]
+    
+    def get(self, values):
+        result = [self.substrings[v] for v in values if v in self.substrings]
+        return sorted(
+            result,
+            cmp = lambda a, b: cmp(a[0], b[0]))
+    
+    def whole(self, value):
+        substrings = dict(self.substrings)
+        substrings[value] = (0, len(self.value, ))
+        return Substrings(self.value, substrings)
+    
+    def append(self, other):
+        if isinstance(other, basestring):
+            return Substrings(self.value + other, dict(self.substrings))
+        
+        offset = len(self.value)
+        substrings = dict(self.substrings)
+        
+        for val, pos in other.substrings.iteritems():
+            substrings[val] = (offset + pos[0], pos[1], )
+        
+        return Substrings(self.value + other.value, substrings)
+    
+    def __add__(self, other):
+        return self.append(other)
+
+
 class Expression(object):
     @property
     def can_be_evaled(self):
         return False
+    
+    def __init__(self):
+        self.silent = False
     
     def __repr__(self):
         return "%s()" % (type(self).__name__, )
     
     def __str__(self):
         return "???"
+
+    def to_substrings(self):
+        return Substrings(self)
+
+    def get_free_vars(self, name):
+        return []
     
     def substitute(self, subs):
         return self
@@ -352,6 +509,12 @@ class Expression(object):
         return self
     
     def normalize(self):
+        """Perform a single normalization step.
+        Returns None if expression is in normal form.
+        """
+        return None
+    
+    def normalize_verbose(self, context):
         return None
     
     def chain(self, other):
@@ -360,6 +523,7 @@ class Expression(object):
 
 class LetExp(Expression):
     def __init__(self, var, value, expr = None):
+        Expression.__init__(self)
         self.var = var
         self.value = value
         self.expr = expr
@@ -386,6 +550,7 @@ class LetExp(Expression):
 
 class VarRef(Expression):
     def __init__(self, ident):
+        Expression.__init__(self)
         self.ident = ident
     
     def __repr__(self):
@@ -393,6 +558,9 @@ class VarRef(Expression):
     
     def __str__(self):
         return self.ident
+
+    def get_free_vars(self, name):
+        return [self, ]
     
     def substitute(self, subs):
         try:
@@ -409,6 +577,7 @@ class Application(Expression):
         return False
     
     def __init__(self, fn, args):
+        Expression.__init__(self)
         self.fn = fn
         self.args = args
     
@@ -417,6 +586,23 @@ class Application(Expression):
     
     def __str__(self):
         return "(%s %s)" % (self.fn, ", ".join((str(a) for a in self.args)), )
+    
+    def to_substrings(self):
+        result = Substrings("(")
+        result += self.fn.to_substrings()
+        
+        for a in self.args:
+            result += " "
+            result += a.to_substrings()
+        
+        result += ")"
+        return result.whole(self)
+    
+    def get_free_vars(self, name):
+        result = self.fn.get_free_vars(name)
+        for a in self.args:
+            result += a.get_free_vars(name)
+        return result
     
     def substitute(self, subs):
         return Application(
@@ -439,6 +625,32 @@ class Application(Expression):
         
         return self.fn.apply(self.args)
     
+    def normalize_verbose(self, context):
+        if len(self.args) > 1:
+            return context.advance(
+                Application.from_list([self.fn, ] + self.args),
+                "rewriting application to normal form",
+                orig = self)
+        
+        if isinstance(self.fn, Lambda):
+            return context.advance(
+                self.fn.apply(self.args),
+                "beta-reduction",
+                highlight = [self.fn, ] + self.args,
+                fn = self.fn, args = self.args)
+        
+        c = self.fn.normalize_verbose(context)
+        if c:
+            return c.advance(Application(c.value, self.args))
+        
+        for i, a in enumerate(self.args):
+            c = a.normalize_verbose(context)
+            if not c: continue
+            return c.advance(
+                Application(self.fn, self.args[:i] + [c.value, ] + self.args[i + 1:]))
+        
+        return None
+    
     @classmethod
     def from_list(self, terms):
         if len(terms) == 1:
@@ -449,6 +661,7 @@ class Application(Expression):
 
 class Lambda(Expression):
     def __init__(self, variables, expr):
+        Expression.__init__(self)
         self.variables = variables
         self.expr = expr
     
@@ -457,6 +670,17 @@ class Lambda(Expression):
     
     def __str__(self):
         return "(\\%s . %s)" % (" ".join(self.variables), self.expr, )
+    
+    def to_substrings(self):
+        result = Substrings("(\\%s . " % (" ".join(self.variables), ))
+        result += self.expr.to_substrings()
+        result += ")"
+        return result.whole(self)
+    
+    def get_free_vars(self, name):
+        if name in self.variables:
+            return []
+        return self.expr.get_free_vars(self, name)
     
     def apply(self, args):
         subs = {}
@@ -485,10 +709,16 @@ class Lambda(Expression):
         if expr is None:
             return None
         return Lambda(list(self.variables), expr)
+    
+    def normalize_verbose(self, context):
+        c = self.expr.normalize_verbose(context)
+        if not c: return None
+        return c.advance(Lambda(self.variables, c.value))
 
 
 class Sequence(Expression):
     def __init__(self, terms):
+        Expression.__init__(self)
         self.terms = terms
     
     def __repr__(self):
@@ -496,6 +726,11 @@ class Sequence(Expression):
     
     def __str__(self):
         return ", ".join([str(t) for t in self.terms])
+    
+    def get_free_vars(self, name):
+        return reduce(lambda a, b: a + b,
+                      [t.get_free_vars(name) for t in self.terms],
+                      [])
     
     def substitute(self, subs):
         return Sequence([t.substitute(subs) for t in self.terms])
@@ -508,6 +743,12 @@ class Sequence(Expression):
         if t:
             return Sequence([t, ] + self.terms[1:])
         return Sequence(self.terms[1:])
+    
+    def normalize_verbose(self, context):
+        for i, t in enumerate(self.terms):
+            c = t.normalize_verbose(context)
+            if not c: continue
+            return c.advance(Sequence(self.terms[i:] + [c.value, ] + self.term[i + 1:]))
 
 
 #class PrintBuiltin(Expression):
@@ -551,17 +792,32 @@ class InteractiveInterpreter(cmd.Cmd):
             self._println("\t%s" % (l, ))
     
     def default(self, line):
-        e = self.parser.parse(list(Lexer(line))).value
-        if e:
-            if isinstance(e, LetExp):
-                self.lets.append(e)
-            else:
-                for l in reversed(self.lets):
-                    e = l.chain(e)
-                try:
-                    self._println(normalize(e))
-                except Exception:
-                    self._println("Normalization failed. Possible loop.")
+        parsed = self.parser.parse(list(Lexer(line)))
+        if not parsed:
+            self._println(parsed)
+            #self._println("Syntax error: %s" % (parsed, ))
+            return False
+        
+        e = parsed.value
+        
+        if isinstance(e, LetExp):
+            self.lets.append(e)
+        else:
+            for l in reversed(self.lets):
+                e = l.chain(e)
+            try:
+                c = normalize(e, True)
+                for s in c.steps:
+                    print s
+                print "Normal form: %s" % (c.value, )
+                #self._println(normalize(e))
+            except LambdaException, e:
+                self._println(e)
+            except Exception, e:
+                #t, v, info = sys.exc_info()
+                self._println(traceback.format_exc())
+                #self._println("Normalization failed. Possible loop.")
+        
         return False
 
 
